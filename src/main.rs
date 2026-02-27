@@ -189,11 +189,18 @@ fn get_interval_label(root_idx: u8, target_idx: u8) -> &'static str {
 }
 
 // --- 2. App State ---
+enum InputMode {
+    Chord,
+    Tuning,
+}
 
 struct App {
     input: String,
     progression: Vec<String>,
+    tuning_input: String,
     tuning: Vec<u8>,
+    key: u8,
+    input_mode: InputMode,
 }
 
 impl App {
@@ -202,7 +209,9 @@ impl App {
             input: String::new(),
             // テスト: Fm9, オンコード(C/Bb), テンション(G13)
             progression: vec!["Fm9".into(), "C/Bb".into(), "G13".into(), "Dbdim7".into()],
+            tuning_input: "C G D G A D".to_string(),
             tuning: vec![0, 7, 2, 7, 9, 2], // C G D G A D
+            input_mode: InputMode::Chord,
         }
     }
 
@@ -210,6 +219,10 @@ impl App {
         if !self.input.is_empty() {
             self.progression = self.input.split_whitespace().map(|s| s.to_string()).collect();
             self.input.clear();
+        }
+
+        if !self.tuning_input.is_empty() && self.tuning_input.split_whitespace().count() == 6 {
+            self.tuning = self.tuning_input.split_whitespace().map(|s| *get_note_mapping().get(s).unwrap_or(&0)).collect();
         }
     }
 }
@@ -231,9 +244,28 @@ fn main() -> Result<()> {
                 match key.code {
                     KeyCode::Esc => break,
                     KeyCode::Enter => app.submit(),
-                    KeyCode::Char(c) => app.input.push(c),
-                    KeyCode::Backspace => { app.input.pop(); },
+                    KeyCode::Up => app.key = (app.key + 1) % 12,
+                    KeyCode::Down => app.key = (app.key + 11) % 12,
                     _ => {}
+                },
+
+                match app.input_mode {
+                    InputMode::Chord => {
+                        match key.code {
+                            KeyCode::Char(c) => app.input.push(c),
+                            KeyCode::Backspace => { app.input.pop(); },
+                            KeyCode::Tab => app.input_mode = InputMode::Tuning,
+                            _ => {}
+                        }
+                    },
+                    InputMode::Tuning => {
+                        match key.code {
+                            KeyCode::Char(c) => app.tuning_input.push(c),
+                            KeyCode::Backspace => { app.tuning_input.pop(); },
+                            KeyCode::Tab => app.input_mode = InputMode::Chord,
+                            _ => {}
+                        }
+                    }
                 }
             }
         }
@@ -249,10 +281,20 @@ fn ui(f: &mut Frame, app: &mut App) {
         .constraints([Constraint::Length(3), Constraint::Min(1), Constraint::Length(1)])
         .split(f.size());
 
-    let input_p = Paragraph::new(app.input.as_str())
-        .block(Block::default().borders(Borders::ALL).title(" Input Chords "))
-        .style(Style::default().fg(Color::Cyan));
-    f.render_widget(input_p, chunks[0]);
+    match app.input_mode {
+        InputMode::Chord => {
+            let input_p = Paragraph::new(app.input.as_str())
+            .block(Block::default().borders(Borders::ALL).title(" Input Chords "))
+            .style(Style::default().fg(Color::Cyan));
+            f.render_widget(input_p, chunks[0]);
+        },
+        InputMode::Tuning => {
+            let input_p = Paragraph::new(app.tuning_input.as_str())
+            .block(Block::default().borders(Borders::ALL).title(" Input Tuning "))
+            .style(Style::default().fg(Color::Cyan));
+            f.render_widget(input_p, chunks[0]);
+        }
+    }
 
     let header_cells = ["Chord", "Depth", "Local Key", "Notes", "6(C)", "5(G)", "4(D)", "3(G)", "2(A)", "1(D)"]
         .iter().map(|h| Cell::from(*h).style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)));
@@ -260,16 +302,17 @@ fn ui(f: &mut Frame, app: &mut App) {
 
     let rows = app.progression.iter().map(|chord_str| {
         let (root_disp, _quality, notes) = parse_chord_v5(chord_str);
+        let relative_notes = notes.iter().map(|n| (n - app.key + 12) % 12).collect::<Vec<u8>>();
         
         let parts: Vec<&str> = root_disp.split('/').collect();
         let root_idx = *get_note_mapping().get(parts[0]).unwrap_or(&0);
 
         // ★ 変更点: 複数の候補を受け取る
-        let (candidates, _score, perfect) = calculate_tonal_depth(&notes);
-        
+        let (candidates, _score, perfect) = calculate_tonal_depth(&relative_notes);
+        let absolute_candidates: Vec<(i8, String)> = candidates.iter().map(|(d, s)| (*d + app.key, s.to_string())).collect();
         // 代表値（スケール表示用）は、リストの最初のものを使う（あるいは0に近いものを選ぶロジックも可）
         // ここでは便宜上、先頭を使う
-        let primary_candidate = candidates.first().unwrap_or(&(0, "C"));
+        let primary_candidate = absolute_candidates.first().unwrap_or(&(0, "C"));
         let key_root_idx = *get_note_mapping().get(primary_candidate.1).unwrap_or(&0);
         let scale_notes = get_scale_mask(key_root_idx);
 
@@ -278,14 +321,14 @@ fn ui(f: &mut Frame, app: &mut App) {
         
         // ★ Depth表示: 複数ある場合はカンマ区切りで表示
         // 例: "-3, +0, +3"
-        let depth_str = candidates.iter()
+        let depth_str = absolute_candidates.iter()
             .map(|(d, _)| format!("{:+}", d))
             .collect::<Vec<_>>()
             .join(" "); // スペースかカンマで区切る
             
         let d_style = if perfect {
             // 完全一致が複数ある場合（C major chordなど）は、一番0に近いものを色判定基準にする
-            let rep_depth = candidates[0].0; 
+            let rep_depth = absolute_candidates[0].0; 
             let c = if rep_depth == 0 { Color::Green } else if rep_depth.abs() <= 1 { Color::Yellow } else { Color::Red };
             Style::default().fg(c)
         } else {
@@ -295,7 +338,7 @@ fn ui(f: &mut Frame, app: &mut App) {
         cells.push(Cell::from(depth_str).style(d_style));
 
         // ★ Key表示: 複数ある場合はカンマ区切り
-        let key_str = candidates.iter()
+        let key_str = absolute_candidates.iter()
             .map(|(_, name)| *name)
             .collect::<Vec<_>>()
             .join(" ");
