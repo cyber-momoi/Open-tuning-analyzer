@@ -212,10 +212,28 @@ impl App {
             tuning_input: "C G D G A D".to_string(),
             tuning: vec![0, 7, 2, 7, 9, 2], // C G D G A D
             input_mode: InputMode::Chord,
+            key: 0,
         }
     }
 
     fn submit(&mut self) {
+        // 1. 入力モードの判定
+        match self.input_mode {
+            InputMode::Chord => {
+                // 2. コード入力モードの場合
+                if !self.input.is_empty() {
+                    self.progression = self.input.split_whitespace().map(|s| s.to_string()).collect();
+                    self.input.clear();
+                }
+            },
+            InputMode::Tuning => {
+                // 3. チューニング入力モードの場合
+                if !self.tuning_input.is_empty() && self.tuning_input.split_whitespace().count() == 6 {
+                    self.tuning = self.tuning_input.split_whitespace().map(|s| *get_note_mapping().get(s).unwrap_or(&0)).collect();
+                }
+            }
+        }
+
         if !self.input.is_empty() {
             self.progression = self.input.split_whitespace().map(|s| s.to_string()).collect();
             self.input.clear();
@@ -247,7 +265,7 @@ fn main() -> Result<()> {
                     KeyCode::Up => app.key = (app.key + 1) % 12,
                     KeyCode::Down => app.key = (app.key + 11) % 12,
                     _ => {}
-                },
+                }
 
                 match app.input_mode {
                     InputMode::Chord => {
@@ -281,69 +299,92 @@ fn ui(f: &mut Frame, app: &mut App) {
         .constraints([Constraint::Length(3), Constraint::Min(1), Constraint::Length(1)])
         .split(f.size());
 
+    let current_key_name = idx_to_note_name(app.key);
+
     match app.input_mode {
         InputMode::Chord => {
+            // ★ タイトルに現在のKeyを埋め込む
+            let title = format!(" Input Chords (Key: {}) ", current_key_name);
             let input_p = Paragraph::new(app.input.as_str())
-            .block(Block::default().borders(Borders::ALL).title(" Input Chords "))
+            .block(Block::default().borders(Borders::ALL).title(title))
             .style(Style::default().fg(Color::Cyan));
             f.render_widget(input_p, chunks[0]);
         },
         InputMode::Tuning => {
+            // ★ こちらも同様に
+            let title = format!(" Input Tuning (Key: {}) ", current_key_name);
             let input_p = Paragraph::new(app.tuning_input.as_str())
-            .block(Block::default().borders(Borders::ALL).title(" Input Tuning "))
+            .block(Block::default().borders(Borders::ALL).title(title))
             .style(Style::default().fg(Color::Cyan));
             f.render_widget(input_p, chunks[0]);
         }
     }
 
-    let header_cells = ["Chord", "Depth", "Local Key", "Notes", "6(C)", "5(G)", "4(D)", "3(G)", "2(A)", "1(D)"]
-        .iter().map(|h| Cell::from(*h).style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)));
+    let mut header_cells = vec![
+        Cell::from("Chord").style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Cell::from("Depth").style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Cell::from("Local Key").style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Cell::from("Notes").style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+    ];
+
+    let string_count = app.tuning.len();
+    // 弦の数に合わせて「6(C), 5(G)...」を生成
+    for (i, &note_idx) in app.tuning.iter().enumerate() {
+        let string_num = string_count - i;
+        let note_name = idx_to_note_name(note_idx);
+        let header_label = format!("{}({})", string_num, note_name);
+        header_cells.push(Cell::from(header_label).style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)));
+    }
+
     let header = Row::new(header_cells).height(1).bottom_margin(1);
 
     let rows = app.progression.iter().map(|chord_str| {
         let (root_disp, _quality, notes) = parse_chord_v5(chord_str);
-        let relative_notes = notes.iter().map(|n| (n - app.key + 12) % 12).collect::<Vec<u8>>();
+        let relative_notes = notes.iter().map(|n| (n + 12 - app.key) % 12).collect::<Vec<u8>>();
         
         let parts: Vec<&str> = root_disp.split('/').collect();
         let root_idx = *get_note_mapping().get(parts[0]).unwrap_or(&0);
 
         // ★ 変更点: 複数の候補を受け取る
         let (candidates, _score, perfect) = calculate_tonal_depth(&relative_notes);
-        let absolute_candidates: Vec<(i8, String)> = candidates.iter().map(|(d, s)| (*d + app.key, s.to_string())).collect();
-        // 代表値（スケール表示用）は、リストの最初のものを使う（あるいは0に近いものを選ぶロジックも可）
-        // ここでは便宜上、先頭を使う
-        let primary_candidate = absolute_candidates.first().unwrap_or(&(0, "C"));
-        let key_root_idx = *get_note_mapping().get(primary_candidate.1).unwrap_or(&0);
+        let display_candidates: Vec<(i32, String)> = candidates.iter()
+            .map(|&(d, s)| {
+                let rel_key_idx = *get_note_mapping().get(s).unwrap_or(&0);
+                let abs_key_idx = (rel_key_idx + app.key) % 12; // 実際の音階に戻す
+                let abs_key_name = idx_to_note_name(abs_key_idx).to_string();
+                (d, abs_key_name)
+            })
+            .collect();
+
+        // 代表値（スケール表示用）
+        let key_root_name = display_candidates.first().map(|c| c.1.as_str()).unwrap_or("C");
+        let key_root_idx = *get_note_mapping().get(key_root_name).unwrap_or(&0);
         let scale_notes = get_scale_mask(key_root_idx);
 
         let mut cells = Vec::new();
         cells.push(Cell::from(chord_str.as_str()).style(Style::default().add_modifier(Modifier::BOLD)));
         
-        // ★ Depth表示: 複数ある場合はカンマ区切りで表示
-        // 例: "-3, +0, +3"
-        let depth_str = absolute_candidates.iter()
+        // Depth表示 (display_candidates を使うように変更)
+        let depth_str = display_candidates.iter()
             .map(|(d, _)| format!("{:+}", d))
             .collect::<Vec<_>>()
-            .join(" "); // スペースかカンマで区切る
+            .join(" ");
             
         let d_style = if perfect {
-            // 完全一致が複数ある場合（C major chordなど）は、一番0に近いものを色判定基準にする
-            let rep_depth = absolute_candidates[0].0; 
+            let rep_depth = display_candidates[0].0; 
             let c = if rep_depth == 0 { Color::Green } else if rep_depth.abs() <= 1 { Color::Yellow } else { Color::Red };
             Style::default().fg(c)
         } else {
-            // 不完全一致（dim7など）はマゼンタで「重ね合わせ」を強調
             Style::default().fg(Color::Magenta).add_modifier(Modifier::ITALIC)
         };
         cells.push(Cell::from(depth_str).style(d_style));
 
-        // ★ Key表示: 複数ある場合はカンマ区切り
-        let key_str = absolute_candidates.iter()
-            .map(|(_, name)| *name)
+        // Key表示 (display_candidates を使うように変更)
+        let key_str = display_candidates.iter()
+            .map(|(_, name)| name.clone())
             .collect::<Vec<_>>()
             .join(" ");
         cells.push(Cell::from(key_str));
-
         // ... (Notes, Strings表示は変更なし) ...
         
         let note_names: Vec<String> = notes.iter().map(|&i| idx_to_note_name(i).to_string()).collect();
@@ -367,13 +408,20 @@ fn ui(f: &mut Frame, app: &mut App) {
         Row::new(cells)
     });
 
-    let table = Table::new(rows, [
-        Constraint::Percentage(12), Constraint::Percentage(10), Constraint::Percentage(10), Constraint::Percentage(14),
-        Constraint::Percentage(9), Constraint::Percentage(9), Constraint::Percentage(9),
-        Constraint::Percentage(9), Constraint::Percentage(9), Constraint::Percentage(9),
-    ])
-    .header(header)
-    .block(Block::default().borders(Borders::ALL).title(" Physics Engine v5 (Zero-Dependency) "));
+   let mut constraints = vec![
+        Constraint::Percentage(12), // Chord
+        Constraint::Percentage(10), // Depth
+        Constraint::Percentage(10), // Local Key
+        Constraint::Percentage(14), // Notes
+    ];
+    let string_width = 54 / string_count.max(1) as u16; // ゼロ除算防止
+    for _ in 0..string_count {
+        constraints.push(Constraint::Percentage(string_width));
+    }
+
+    let table = Table::new(rows, constraints)
+        .header(header)
+        .block(Block::default().borders(Borders::ALL).title(" Physics Engine v5 (Zero-Dependency) "));
 
     f.render_widget(table, chunks[1]);
     
